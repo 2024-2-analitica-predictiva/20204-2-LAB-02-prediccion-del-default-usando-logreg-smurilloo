@@ -95,3 +95,112 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+
+import pandas as pd
+import numpy as np
+import gzip
+import pickle
+import json
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    precision_score,
+    balanced_accuracy_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
+
+# Paths
+train_path = "files/input/train_data.csv.zip"
+test_path = "files/input/test_data.csv.zip"
+model_path = "files/models/model.pkl.gz"
+metrics_path = "files/output/metrics.json"
+
+# Paso 1: Cargar y limpiar los datos
+train_data = pd.read_csv(train_path)
+test_data = pd.read_csv(test_path)
+
+# Renombrar la columna objetivo y eliminar la columna 'ID'
+train_data.rename(columns={"default payment next month": "default"}, inplace=True)
+test_data.rename(columns={"default payment next month": "default"}, inplace=True)
+train_data.drop(columns=["ID"], inplace=True)
+test_data.drop(columns=["ID"], inplace=True)
+
+# Eliminar registros con información no disponible
+train_data = train_data.replace({"EDUCATION": {0: np.nan}, "MARRIAGE": {0: np.nan}})
+test_data = test_data.replace({"EDUCATION": {0: np.nan}, "MARRIAGE": {0: np.nan}})
+train_data.dropna(inplace=True)
+test_data.dropna(inplace=True)
+
+# Agrupar niveles superiores de EDUCATION en la categoría "others"
+train_data["EDUCATION"] = train_data["EDUCATION"].apply(lambda x: x if x <= 4 else 4)
+test_data["EDUCATION"] = test_data["EDUCATION"].apply(lambda x: x if x <= 4 else 4)
+
+# Paso 2: Dividir en X e y
+X_train = train_data.drop(columns=["default"])
+y_train = train_data["default"]
+X_test = test_data.drop(columns=["default"])
+y_test = test_data["default"]
+
+# Paso 3: Crear el pipeline
+pipeline = Pipeline([
+    ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+    ("scaler", MinMaxScaler()),
+    ("kbest", SelectKBest(score_func=f_classif, k=10)),
+    ("model", LogisticRegression(solver="liblinear")),
+])
+
+# Paso 4: Optimizar hiperparámetros
+param_grid = {
+    "kbest__k": [5, 10, 15],
+    "model__C": [0.01, 0.1, 1, 10],
+}
+grid_search = GridSearchCV(
+    estimator=pipeline,
+    param_grid=param_grid,
+    cv=10,
+    scoring="balanced_accuracy",
+    n_jobs=-1,
+)
+grid_search.fit(X_train, y_train)
+
+# Guardar el modelo
+with gzip.open(model_path, "wb") as f:
+    pickle.dump(grid_search, f)
+
+# Paso 6: Calcular métricas
+metrics = []
+for dataset, X, y, label in [("train", X_train, y_train, "train"), ("test", X_test, y_test, "test")]:
+    y_pred = grid_search.predict(X)
+    precision = precision_score(y, y_pred)
+    balanced_acc = balanced_accuracy_score(y, y_pred)
+    recall = recall_score(y, y_pred)
+    f1 = f1_score(y, y_pred)
+    cm = confusion_matrix(y, y_pred)
+
+    metrics.append({
+        "type": "metrics",
+        "dataset": label,
+        "precision": precision,
+        "balanced_accuracy": balanced_acc,
+        "recall": recall,
+        "f1_score": f1,
+    })
+    metrics.append({
+        "type": "cm_matrix",
+        "dataset": label,
+        "true_0": {"predicted_0": int(cm[0, 0]), "predicted_1": int(cm[0, 1])},
+        "true_1": {"predicted_0": int(cm[1, 0]), "predicted_1": int(cm[1, 1])},
+    })
+
+# Guardar métricas en archivo JSON
+with open(metrics_path, "w", encoding="utf-8") as f:
+    for metric in metrics:
+        json.dump(metric, f)
+        f.write("\n")
+
